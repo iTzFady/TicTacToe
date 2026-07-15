@@ -98,6 +98,12 @@ static void vga_line(int y, const char *s, u8 color, u8 bg_color)
 #define SC_9 0x0A
 #define SC_R 0x13
 #define SC_ESC 0x01
+#define SC_ENTER 0x1C
+#define SC_SPACE 0x39
+#define SC_UP 0x148
+#define SC_DOWN 0x150
+#define SC_LEFT 0x14B
+#define SC_RIGHT 0x14D
 
 static u32 entropy = 2463534242u; /* xorshift32 seed */
 
@@ -105,8 +111,9 @@ static u32 entropy = 2463534242u; /* xorshift32 seed */
  * Spins on the PS/2 status port; each idle spin perturbs our PRNG
  * state, so the exact timing of human keypresses feeds randomness
  * into EASY-mode move selection (no RTC/timer driver needed). */
-static u8 kb_wait_key(void)
+static u16 kb_wait_key(void)
 {
+    int extended = 0;
     for (;;)
     {
         while (!(inb(0x64) & 1))
@@ -116,9 +123,17 @@ static u8 kb_wait_key(void)
             entropy ^= entropy << 5;
         }
         u8 sc = inb(0x60);
+        if (sc == 0xE0)
+        {
+            extended = 1;
+            continue;
+        }
         if (sc & 0x80)
+        {
+            extended = 0;
             continue; /* key release, ignore */
-        return sc;
+        }
+        return (u16)sc | (extended ? 0x100 : 0);
     }
 }
 
@@ -259,60 +274,87 @@ static int ai_move(int player, int difficulty)
 
 /* ================== Rendering ================== */
 
-#define BOARD_X 30
-#define BOARD_Y 6
-/* cell width 4, cell height 2 -> grid spans 3 cells */
+#define BOARD_X 25
+#define BOARD_Y 0
+#define CELL_W 10
+#define CELL_H 7
 
 static void draw_frame(const char *difficulty_name)
 {
-    u8 bg = vga_color(VGA_LGREY, VGA_BLUE);
-    vga_line(0, " TIC-TAC-TOE OS", vga_color(VGA_WHITE, VGA_BLUE), bg);
-    char line[40] = "kernel: minimax  difficulty: ";
+    char line[40] = "TIC-TAC-TOE OS  difficulty: ";
     int len = 0;
     while (line[len])
         len++;
     for (int i = 0; difficulty_name[i]; i++)
         line[len++] = difficulty_name[i];
     line[len] = '\0';
-    vga_line(1, line, vga_color(VGA_LCYAN, VGA_BLACK), vga_color(VGA_LGREY, VGA_BLACK));
+    /* The board begins at row 0, but it is centered, leaving this title area free. */
+    vga_puts(2, 0, line, vga_color(VGA_LCYAN, VGA_BLACK));
 }
 
-static void draw_board(void)
+static void draw_mark(int x, int y, int player, u8 color)
 {
-    u8 grid_color = vga_color(VGA_DGREY, VGA_BLACK);
-    /* horizontal separators */
-    for (int row = 0; row < 2; row++)
+    static const char x_mark[7][10] = {
+        " __   __ ",
+        " \\ \\ / / ",
+        "  \\ V /  ",
+        "  / . \\  ",
+        " / / \\ \\ ",
+        " \\/   \\/ ",
+        "         "};
+    static const char o_mark[7][10] = {
+        "  *****  ",
+        " **   ** ",
+        "**     **",
+        "**     **",
+        "**     **",
+        " **   ** ",
+        "  *****  "};
+    const char (*mark)[10] = player == PLAYER_X ? x_mark : o_mark;
+
+    for (int row = 0; row < CELL_H; row++)
+        for (int col = 0; col < CELL_W - 1; col++)
+            if (mark[row][col] != ' ')
+                vga_putc(x + col, y + row, mark[row][col], color);
+}
+
+static void draw_board(int selected)
+{
+    u8 grid_color = vga_color(VGA_LGREY, VGA_BLACK);
+
+    /* Clear the board area before redrawing it, including an old cursor. */
+    for (int y = 0; y < CELL_H * 3; y++)
+        for (int x = 0; x < CELL_W * 3; x++)
+            vga_putc(BOARD_X + x, BOARD_Y + y, ' ', vga_color(VGA_LGREY, VGA_BLACK));
+
+    /* Wide, simple separators make the board read like a clean 3x3 grid. */
+    for (int row = 1; row < 3; row++)
     {
-        int y = BOARD_Y + row * 2 + 1;
-        for (int x = 0; x < 11; x++)
-        {
-            char c = (x == 3 || x == 7) ? CH_CROSS : CH_HORIZ;
-            vga_putc(BOARD_X + x, y, c, grid_color);
-        }
+        int y = BOARD_Y + row * CELL_H;
+        for (int x = 0; x < CELL_W * 3; x++)
+            vga_putc(BOARD_X + x, y, CH_HORIZ, grid_color);
     }
-    /* vertical separators */
-    for (int col = 0; col < 2; col++)
+    for (int col = 1; col < 3; col++)
     {
-        int x = BOARD_X + col * 4 + 3;
-        for (int y = 0; y < 5; y++)
-        {
-            if (y == 1 || y == 3)
-                continue; /* crossing handled above */
+        int x = BOARD_X + col * CELL_W;
+        for (int y = 0; y < CELL_H * 3; y++)
             vga_putc(x, BOARD_Y + y, CH_VERT, grid_color);
-        }
     }
-    /* marks */
+
     for (int i = 0; i < 9; i++)
     {
         int r = i / 3, c = i % 3;
-        int cx = BOARD_X + c * 4 + 1;
-        int cy = BOARD_Y + r * 2;
-        char ch = board[i] == PLAYER_X ? 'X' : board[i] == PLAYER_O ? 'O'
-                                                                    : ('1' + i);
-        u8 color = board[i] == PLAYER_X   ? vga_color(VGA_LGREEN, VGA_BLACK)
-                   : board[i] == PLAYER_O ? vga_color(VGA_LRED, VGA_BLACK)
-                                          : vga_color(VGA_DGREY, VGA_BLACK);
-        vga_putc(cx, cy, ch, color);
+        int x = BOARD_X + c * CELL_W;
+        int y = BOARD_Y + r * CELL_H;
+        if (board[i] != EMPTY)
+            draw_mark(x, y, board[i], board[i] == PLAYER_X
+                                        ? vga_color(VGA_LBLUE, VGA_BLACK)
+                                        : vga_color(VGA_LRED, VGA_BLACK));
+        if (i == selected)
+        {
+            u8 cursor_color = vga_color(VGA_YELLOW, VGA_BLACK);
+            vga_putc(x + CELL_W - 1, y + 3, '>', cursor_color);
+        }
     }
 }
 
@@ -335,7 +377,7 @@ void kmain(void)
     const char *diff_name;
     for (;;)
     {
-        u8 sc = kb_wait_key();
+        u16 sc = kb_wait_key();
         if (sc == SC_1)
         {
             difficulty = 0;
@@ -362,18 +404,17 @@ void kmain(void)
         vga_clear(vga_color(VGA_LGREY, VGA_BLACK));
         draw_frame(diff_name);
 
-        vga_puts(2, 4, "you are X. press 1-9 to place a mark:", vga_color(VGA_LGREY, VGA_BLACK));
-        vga_puts(2, 20, " 1 | 2 | 3      (keys map to cells in", vga_color(VGA_DGREY, VGA_BLACK));
-        vga_puts(2, 21, " 4 | 5 | 6       reading order, left-to-right,", vga_color(VGA_DGREY, VGA_BLACK));
-        vga_puts(2, 22, " 7 | 8 | 9       top-to-bottom)", vga_color(VGA_DGREY, VGA_BLACK));
+        vga_puts(2, 22, "ARROW KEYS  move cursor     ENTER / SPACE  place X", vga_color(VGA_LCYAN, VGA_BLACK));
+        vga_puts(2, 23, "R  play again                ESC  halt", vga_color(VGA_DGREY, VGA_BLACK));
 
         int turn = HUMAN;
         int result = NONE;
+        int selected = 0;
 
         while (result == NONE)
         {
-            draw_board();
-            vga_line(17, turn == HUMAN ? "your move" : "kernel is thinking...",
+            draw_board(turn == HUMAN ? selected : -1);
+            vga_line(21, turn == HUMAN ? "your move" : "kernel is thinking...",
                      vga_color(turn == HUMAN ? VGA_LGREEN : VGA_LRED, VGA_BLACK),
                      vga_color(VGA_LGREY, VGA_BLACK));
 
@@ -381,16 +422,23 @@ void kmain(void)
             {
                 for (;;)
                 {
-                    u8 sc = kb_wait_key();
-                    if (sc >= SC_1 && sc <= SC_9)
+                    u16 sc = kb_wait_key();
+                    int row = selected / 3;
+                    int col = selected % 3;
+                    if (sc == SC_UP && row > 0)
+                        selected -= 3;
+                    else if (sc == SC_DOWN && row < 2)
+                        selected += 3;
+                    else if (sc == SC_LEFT && col > 0)
+                        selected--;
+                    else if (sc == SC_RIGHT && col < 2)
+                        selected++;
+                    else if ((sc == SC_ENTER || sc == SC_SPACE) && board[selected] == EMPTY)
                     {
-                        int pos = sc - SC_1;
-                        if (board[pos] == EMPTY)
-                        {
-                            board[pos] = HUMAN;
-                            break;
-                        }
+                        board[selected] = HUMAN;
+                        break;
                     }
+                    draw_board(selected);
                 }
             }
             else
@@ -402,17 +450,17 @@ void kmain(void)
             turn = opponent_of(turn);
         }
 
-        draw_board();
+        draw_board(-1);
         if (result == DRAW)
-            vga_line(17, "draw. press R to play again, ESC to halt", vga_color(VGA_YELLOW, VGA_BLACK), vga_color(VGA_LGREY, VGA_BLACK));
+            vga_line(21, "draw. press R to play again, ESC to halt", vga_color(VGA_YELLOW, VGA_BLACK), vga_color(VGA_LGREY, VGA_BLACK));
         else if (result == HUMAN)
-            vga_line(17, "you win! press R to play again, ESC to halt", vga_color(VGA_LGREEN, VGA_BLACK), vga_color(VGA_LGREY, VGA_BLACK));
+            vga_line(21, "you win! press R to play again, ESC to halt", vga_color(VGA_LGREEN, VGA_BLACK), vga_color(VGA_LGREY, VGA_BLACK));
         else
-            vga_line(17, "kernel wins. press R to play again, ESC to halt", vga_color(VGA_LRED, VGA_BLACK), vga_color(VGA_LGREY, VGA_BLACK));
+            vga_line(21, "kernel wins. press R to play again, ESC to halt", vga_color(VGA_LRED, VGA_BLACK), vga_color(VGA_LGREY, VGA_BLACK));
 
         for (;;)
         {
-            u8 sc = kb_wait_key();
+            u16 sc = kb_wait_key();
             if (sc == SC_R)
                 break; /* replay: fall out to outer loop */
             if (sc == SC_ESC)
