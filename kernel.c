@@ -281,15 +281,16 @@ static int ai_move(int player, int difficulty)
 
 static void draw_frame(const char *difficulty_name)
 {
-    char line[40] = "TIC-TAC-TOE OS  difficulty: ";
+    char line[32] = "difficulty: ";
     int len = 0;
     while (line[len])
         len++;
     for (int i = 0; difficulty_name[i]; i++)
         line[len++] = difficulty_name[i];
     line[len] = '\0';
-    /* The board begins at row 0, but it is centered, leaving this title area free. */
-    vga_puts(2, 0, line, vga_color(VGA_LCYAN, VGA_BLACK));
+    /* Keep text left of BOARD_X: draw_board clears the board area each frame. */
+    vga_puts(2, 0, "TIC-TAC-TOE OS", vga_color(VGA_LCYAN, VGA_BLACK));
+    vga_puts(2, 1, line, vga_color(VGA_LCYAN, VGA_BLACK));
 }
 
 static void draw_mark(int x, int y, int player, u8 color)
@@ -303,13 +304,13 @@ static void draw_mark(int x, int y, int player, u8 color)
         " \\/   \\/ ",
         "         "};
     static const char o_mark[7][10] = {
-        "  *****  ",
-        " **   ** ",
-        "**     **",
-        "**     **",
-        "**     **",
-        " **   ** ",
-        "  *****  "};
+        " *****   ",
+        "**   **  ",
+        "**   **  ",
+        "**   **  ",
+        " *****   ",
+        "         ",
+        "         "};
     const char (*mark)[10] = player == PLAYER_X ? x_mark : o_mark;
 
     for (int row = 0; row < CELL_H; row++)
@@ -347,9 +348,10 @@ static void draw_board(int selected)
         int x = BOARD_X + c * CELL_W;
         int y = BOARD_Y + r * CELL_H;
         if (board[i] != EMPTY)
-            draw_mark(x, y, board[i], board[i] == PLAYER_X
-                                        ? vga_color(VGA_LBLUE, VGA_BLACK)
-                                        : vga_color(VGA_LRED, VGA_BLACK));
+            /* One-cell inset keeps the artwork clear of every grid line. */
+            draw_mark(x + 1, y + 1, board[i], board[i] == PLAYER_X
+                                                    ? vga_color(VGA_LBLUE, VGA_BLACK)
+                                                    : vga_color(VGA_LRED, VGA_BLACK));
         if (i == selected)
         {
             u8 cursor_color = vga_color(VGA_YELLOW, VGA_BLACK);
